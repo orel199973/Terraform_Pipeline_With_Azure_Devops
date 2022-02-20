@@ -1,0 +1,55 @@
+
+trigger:
+- none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  subscription: shtech (Sela CSP)
+  resourceGroup: common
+  storageAccount: shtechcommon
+  container: terrafrom-states
+  tfstateFile: Terraform/'$(name)'.tfstate
+  anyTfChanges: false
+
+
+steps:
+- task: Bash@3
+  inputs:
+    targetType: 'inline'
+    script: |
+      #!/bin/bash
+      # Terraform Installer.
+      if ! [ -x "$(command -v terraform)" ]; then
+        sudo apt-get update && sudo apt-get install -y gnupg software-properties-common curl
+        curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+        sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+        sudo apt-get update && sudo apt-get install terraform
+      fi
+
+# Terraform Init.
+- task: TerraformTaskV2@2
+  displayName: terraform init
+  inputs:
+    provider: 'azurerm'
+    command: 'init'
+    workingDirectory: '$(System.DefaultWorkingDirectory)/Terraform/$(env)/main/'
+    backendServiceArm: '$(subscription)'
+    backendAzureRmResourceGroupName: '$(resourceGroup)'
+    backendAzureRmStorageAccountName: '$(storageAccount)'
+    backendAzureRmContainerName: '$(container)'
+    backendAzureRmKey: '$(tfstateFile)'
+
+# Terraform Plan & Apply.
+- task: TerraformTaskV2@2
+  displayName: terraform destroy
+  env:
+    TF_VAR_resource_group_name: $(resource_group_name)
+    TF_VAR_name: $(name)
+  inputs:
+    provider: 'azurerm'
+    command: 'destroy'
+    workingDirectory: '$(System.DefaultWorkingDirectory)/Terraform/$(env)/main/'
+    environmentServiceNameAzureRM: '$(subscription)'
+

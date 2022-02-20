@@ -1,0 +1,128 @@
+
+trigger:
+- none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  subscription: shtech
+  resourceGroup: shtech
+  storageAccount: shtechcommon
+  container: terrafrom-states
+  tfstateFile: Terraform/'$(name)'.tfstate
+  anyTfChanges: false
+
+
+steps:
+- task: Bash@3
+  inputs:
+    targetType: 'inline'
+    script: |
+      #!/bin/bash
+      # Terraform Installer.
+      if ! [ -x "$(command -v terraform)" ]; then
+        sudo apt-get update && sudo apt-get install -y gnupg software-properties-common curl
+        curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+        sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+        sudo apt-get update && sudo apt-get install terraform
+      fi
+
+# Terraform Init.
+- task: TerraformTaskV2@2
+  displayName: terraform init
+  inputs:
+    provider: 'azurerm'
+    command: 'init'
+    workingDirectory: '$(System.DefaultWorkingDirectory)/Terraform/$(env)/main/'
+    backendServiceArm: '$(subscription)'
+    backendAzureRmResourceGroupName: '$(resourceGroup)'
+    backendAzureRmStorageAccountName: '$(storageAccount)'
+    backendAzureRmContainerName: '$(container)'
+    backendAzureRmKey: '$(tfstateFile)'
+
+# Terraform Plan & Apply.
+- task: TerraformTaskV2@2
+  displayName: terraform apply
+  env:
+    TF_VAR_resource_group_name: $(resource_group_name)
+    TF_VAR_name: $(name)
+  inputs:
+    provider: 'azurerm'
+    command: 'apply'
+    workingDirectory: '$(System.DefaultWorkingDirectory)/Terraform/$(env)/main/'
+    environmentServiceNameAzureRM: '$(subscription)'
+
+- task: HelmInstaller@1
+  displayName: "install helm"
+  inputs:
+    helmVersionToInstall: 3.2.3
+
+- task: AzureCLI@2
+  displayName: 'deploy helm charts'
+  env:
+    aks: $(name)
+    rg: $(name)
+  inputs:
+    scriptType: bash
+    scriptLocation: inlineScript
+    azureSubscription: '$(subscription)'
+    inlineScript: |
+      az aks get-credentials \
+        -n ${aks} \
+        -g ${rg}
+      helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+      helm upgrade --install \
+        ingress-nginx \
+        ingress-nginx/ingress-nginx \
+        --version "3.30.0" \
+        --namespace ingress-nginx \
+        --create-namespace
+      # sleep 10
+      # kubectl -n ingress-nginx apply -f kubernetes/cert-manager/cert-issuer.yaml
+      
+      helm upgrade --install \
+        openvpn \
+        ./components/openvpn/openvpn \
+        -n openvpn \
+        --create-namespace
+      
+      helm repo add jetstack https://charts.jetstack.io
+      helm upgrade --install \
+        cert-manager jetstack/cert-manager \
+        --namespace ingress-nginx \
+        --version v1.6.1 \
+        --set installCRDs=true
+
+      # Fetch tenant and subscription ids for external-dns
+      export AZ_TENANT_ID=$(az account show --query tenantId --output tsv)
+      export AZ_SUBSCRIPTION_ID=$(az account show --query id --output tsv)
+      export DOMAIN=$(az network dns zone list -g bibi --query [].name -o tsv)
+
+      helm repo add bitnami https://charts.bitnami.com/bitnami
+      helm upgrade --install \
+        external-dns \
+        bitnami/external-dns \
+        --version "6.0.2" \
+        --set provider=azure \
+        --set azure.resourceGroup=${rg} \
+        --set azure.tenantId=${AZ_TENANT_ID} \
+        --set azure.subscriptionId=${AZ_SUBSCRIPTION_ID} \
+        --set azure.useManagedIdentityExtension=true \
+        --set domainFilters[0]=${DOMAIN} \
+        --namespace kube-addons \
+        --create-namespace
+
+
+- task: AzureCLI@2
+  displayName: 'deploy Helm Umbrella Chart'
+  env:
+    aks: $(name)
+    rg: $(name)
+  inputs:
+    scriptType: bash
+    scriptLocation: inlineScript
+    azureSubscription: '$(subscription)'
+    inlineScript: |
+      helm dep update components/shtech/main
+      helm upgrade --install shtech components/shtech/main
